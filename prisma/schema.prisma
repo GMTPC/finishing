@@ -1,0 +1,173 @@
+// โครงสร้างฐานข้อมูลของระบบบันทึกการผลิตแผนกฟินิชชิ่ง
+// ที่เดียวที่นิยามตาราง — ห้าม CREATE TABLE ใน server/api อีก (append-only ledger)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+/// งานแปรรูป 1 ครั้งของสถานี (job) — ต้องสร้างก่อนจึงจะบันทึกขั้นตอน 1–4 ได้
+/// status: active = กำลังแปรรูป, done = แปรรูปแล้ว (ปิดด้วยการกดปุ่ม "จบงาน")
+model Job {
+  id             Int       @id @default(autoincrement())
+  code           String    @unique @db.NVarChar(40)
+  stationId      String    @map("station_id") @db.NVarChar(20)
+  shift          String    @db.NVarChar(20)
+  machine        String    @db.NVarChar(100)
+  /// ชนิด PVC ของงาน (เฉพาะสถานีที่มีให้เลือก เช่น S1)
+  pvcType        String?   @map("pvc_type") @db.NVarChar(100)
+  /// รายชื่อพนักงานที่ทำงานใน job นี้ เก็บเป็น JSON array (มีได้หลายคน)
+  operators      String    @db.NVarChar(Max)
+  status         String    @default("active") @db.NVarChar(20)
+  startedAt      DateTime  @map("started_at")
+  finishedAt     DateTime? @map("finished_at")
+  finishedBy     String?   @map("finished_by") @db.NVarChar(100)
+  /// จำนวนตัดทิ้งของงานนี้ (แก้ไขได้ระหว่างทำงาน)
+  trimQty        Int       @default(0) @map("trim_qty")
+  note           String?   @db.NVarChar(Max)
+  idempotencyKey String    @unique @map("idempotency_key") @db.NVarChar(64)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  records    WorkRecord[]
+  issuedTags IssuedTag[]
+  wipEntries WipEntry[]
+
+  @@index([stationId, status, startedAt])
+  @@map("jobs")
+}
+
+/// ledger การเคลื่อนไหวของงานทุกขั้นตอน เขียนเพิ่มเท่านั้น ห้าม UPDATE/DELETE ย้อนหลัง
+/// ถ้าต้องแก้ ให้บันทึกรายการกลับทาง (reversal) เป็นแถวใหม่
+model WorkRecord {
+  id             Int      @id @default(autoincrement())
+  stationId      String   @map("station_id") @db.NVarChar(20)
+  jobId          Int      @map("job_id")
+  step           Int
+  status         String   @db.NVarChar(120)
+  shift          String   @db.NVarChar(20)
+  operator       String?  @db.NVarChar(100)
+  tagCode        String?  @map("tag_code") @db.NVarChar(100)
+  producedQty    Int      @default(0) @map("produced_qty")
+  defectQty      Int      @default(0) @map("defect_qty")
+  inputSource    String?  @map("input_source") @db.NVarChar(20)
+  destination    String?  @db.NVarChar(20)
+  signatureData  String?  @map("signature_data") @db.NVarChar(Max)
+  /// รายละเอียดเพิ่มเติมเก็บเป็น JSON (ค่าตั้งลูกกลิ้ง, วัสดุแพ็คเกจจิ้ง ฯลฯ)
+  details        String?  @db.NVarChar(Max)
+  /// UUID จาก client กันบันทึกซ้ำตอนมือถือส่งซ้ำเพราะเน็ตหลุด
+  idempotencyKey String   @unique @map("idempotency_key") @db.NVarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  job Job @relation(fields: [jobId], references: [id])
+
+  @@index([stationId, createdAt])
+  @@index([jobId, step])
+  @@index([tagCode])
+  @@map("work_records")
+}
+
+/// รายการ TAG ที่สแกนรับเข้างาน (คอลัมน์ "ข้อมูลเข้า (WIP)")
+/// 1 งานมีได้หลายแถว — กันสแกนซ้ำด้วย unique [jobId, barcode]
+model WipEntry {
+  id             Int      @id @default(autoincrement())
+  jobId          Int      @map("job_id")
+  stationId      String   @map("station_id") @db.NVarChar(20)
+  /// บาร์โค้ดที่สแกนได้ทั้งเส้น
+  barcode        String   @db.NVarChar(200)
+  itemCode       String   @map("item_code") @db.NVarChar(50)
+  itemName       String?  @map("item_name") @db.NVarChar(255)
+  sizeText       String?  @map("size_text") @db.NVarChar(100)
+  /// Lot ของต้นทาง (คัดบอร์ด)
+  sourceLot      String?  @map("source_lot") @db.NVarChar(50)
+  quantity       Int      @default(0)
+  scannedBy      String?  @map("scanned_by") @db.NVarChar(200)
+  idempotencyKey String   @unique @map("idempotency_key") @db.NVarChar(64)
+  scannedAt      DateTime @default(now()) @map("scanned_at")
+
+  job       Job        @relation(fields: [jobId], references: [id])
+  issuedTag IssuedTag?
+
+  @@unique([jobId, barcode])
+  @@index([stationId, scannedAt])
+  @@map("wip_entries")
+}
+
+/// TAG ที่ฟินิชชิ่งออกใหม่ (1 TAG คัดบอร์ดที่สแกนเข้า → 1 TAG ใหม่)
+/// running ออกโดย server เพื่อไม่ให้เลขชนกันระหว่างเครื่อง
+model IssuedTag {
+  id             Int      @id @default(autoincrement())
+  code           String   @unique @db.NVarChar(100)
+  jobId          Int      @map("job_id")
+  stationId      String   @map("station_id") @db.NVarChar(20)
+  /// แถวที่สแกนเข้าซึ่ง TAG ใบนี้ออกมาจาก (1 เข้า → 1 ออก)
+  wipEntryId     Int?     @unique @map("wip_entry_id")
+  itemCode       String   @map("item_code") @db.NVarChar(50)
+  /// รหัสสินค้าขาออก (เช่น BX58-AV0212) — ต่างจากรหัสขาเข้า
+  outItemCode    String?  @map("out_item_code") @db.NVarChar(50)
+  itemName       String?  @map("item_name") @db.NVarChar(255)
+  sizeText       String?  @map("size_text") @db.NVarChar(100)
+  /// LOT ใหม่ของฟินิชชิ่ง (เช่น 260925A501)
+  lot            String   @db.NVarChar(50)
+  running        Int
+  quantity       Int      @default(0)
+  /// TAG ต้นทางจากคัดบอร์ด — unique เพราะ 1 ใบเข้า ออกได้ 1 ใบเท่านั้น
+  sourceTagCode  String?  @unique @map("source_tag_code") @db.NVarChar(100)
+  sourceLot      String?  @map("source_lot") @db.NVarChar(50)
+  issuedBy       String?  @map("issued_by") @db.NVarChar(100)
+  idempotencyKey String   @unique @map("idempotency_key") @db.NVarChar(64)
+  issuedAt       DateTime @default(now()) @map("issued_at")
+
+  job      Job       @relation(fields: [jobId], references: [id], onUpdate: NoAction, onDelete: NoAction)
+  wipEntry WipEntry? @relation(fields: [wipEntryId], references: [id])
+
+  @@unique([lot, running])
+  @@index([stationId, issuedAt])
+  @@map("issued_tags")
+}
+
+/// การรับ TAG เข้าสถานี (ขั้นตอนที่ 1)
+model TagReceive {
+  id             Int      @id @default(autoincrement())
+  tagCode        String   @map("tag_code") @db.NVarChar(100)
+  stationId      String   @map("station_id") @db.NVarChar(20)
+  operator       String   @db.NVarChar(100)
+  quantity       Int      @default(0)
+  idempotencyKey String   @unique @map("idempotency_key") @db.NVarChar(64)
+  receivedAt     DateTime @default(now()) @map("received_at")
+
+  @@index([stationId, receivedAt])
+  @@map("tag_receives")
+}
+
+/// การปิดกะของแต่ละสถานี
+model ShiftClose {
+  id             Int      @id @default(autoincrement())
+  shiftId        String   @map("shift_id") @db.NVarChar(50)
+  stationId      String   @map("station_id") @db.NVarChar(20)
+  shift          String   @db.NVarChar(20)
+  closedBy       String   @map("closed_by") @db.NVarChar(100)
+  totalPassed    Int      @default(0) @map("total_passed")
+  totalScrap     Int      @default(0) @map("total_scrap")
+  idempotencyKey String   @unique @map("idempotency_key") @db.NVarChar(64)
+  closedAt       DateTime @default(now()) @map("closed_at")
+
+  @@index([stationId, closedAt])
+  @@map("shift_closes")
+}
+
+/// ผู้ใช้งานในระบบ (พนักงานหน้าเครื่อง S01-S05 และ Admin)
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique @db.NVarChar(50)
+  name      String   @db.NVarChar(100)
+  password  String   @db.NVarChar(255)
+  role      String   @default("operator") @db.NVarChar(20)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("users")
+}
+

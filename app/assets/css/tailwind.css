@@ -1,0 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Prompt:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'IBM Plex Sans Thai', 'Prompt', -apple-system, BlinkMacSystemFont, sans-serif;
+  @apply bg-[#F3F4F1] text-[#16181D] antialiased min-h-screen selection:bg-[#2457D6] selection:text-white;
+}
+
+.font-mono {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Custom scrollbar for mobile board */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(161, 172, 184, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(161, 172, 184, 0.7);
+}
+
+.sneat-card {
+  @apply bg-white rounded-xl border border-[#E3E5E0] shadow-sm transition-all duration-200;
+}
+
+.sneat-card-hover {
+  @apply hover:shadow hover:-translate-y-0.5;
+}
+
+.sneat-btn-primary {
+  @apply bg-[#2457D6] hover:bg-[#1D46AF] active:bg-[#17388C] text-white font-semibold rounded-xl shadow-sm transition active:scale-95;
+}
+
+
